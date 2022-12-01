@@ -1,0 +1,637 @@
+---
+title: "ETC 3550- Retail project"
+author: "Jason Ching Yuen, Siu (31084222)"
+date: "14/05/2022"
+output:
+  html_document:
+    after_body: tutorial-footer.html
+    css: assignment.css
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r echo = FALSE, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  error = FALSE, 
+  collapse = TRUE,
+  echo = FALSE,
+  comment = "#",
+  fig.height = 4,
+  fig.width = 8,
+  out.width = "100%",
+  fig.align = "center",
+  fig.retina = 4,
+  cache = T
+)
+```
+
+
+```{r}
+library(fpp3)
+library(tidyverse)
+library(kableExtra)
+library(DT) #install.packages("DT")
+library(gridExtra)
+library(janitor)
+```
+
+```{r}
+# Use your student ID as the seed
+set.seed(31084222)
+myseries <- aus_retail %>%
+  # Remove discontinued series
+  filter(!(`Series ID` %in% c("A3349561R","A3349883F","A3349499L","A3349902A",
+                        "A3349588R","A3349763L","A3349372C","A3349450X",
+                        "A3349679W","A3349378T","A3349767W","A3349451A"))) %>%
+  # Select a series at random
+  filter(`Series ID` == sample(`Series ID`,1))
+```
+
+```{r}
+kab <- function(df, caption) {
+  df %>%  kbl( align = "c", caption = paste("<center><strong>",caption,"</strong></center>")) %>% 
+    kable_paper( ) %>%  
+    kable_styling(bootstrap_options = c("striped", "hover")) 
+}
+```
+
+
+### After Data Preperation, we are interested in the statistical features of the original data.
+```{r}
+myseries %>% 
+  autoplot()+
+  theme_bw() +
+    geom_smooth()+
+  ggtitle("Turnover in New South Wales (1982-2018)")+
+  labs(y="Turnover ($ million AUD)",
+       subtitle = "Other recreational goods retailing")
+
+```
+
+
+From this time series plot, we can observe that :
+
+ - The data features a non-linear upward trend and seasonal pattern. This is not surprising given general economic growth and inflation.
+
+ - The seasonality is multiplicative.
+
+ - The variability in the data appears proportional to the amount of turnover (level of the series) over the time period.
+
+```{r fig.width=8,fig.height=6.5}
+myseries %>%
+  gg_season(Turnover, labels = "both") +
+  labs(y = "Turnover (million $AUD)",
+       title = myseries$Industry[1],
+       subtitle = myseries$State[1])+
+  theme_minimal()
+```
+
+
+From this seasonal plot, we can observe that :
+
+ - The emergence of a seasonality is very strong, with December's Turnover in every year being always the highest across the year, which is sensible as Christmas sales (e.g., Black Friday) is biggest consumer sales season. Another peak had happened in July which appears to be getting stronger over time. 2016 had an unusual pattern in the first half of the year.
+
+ - Despite the variation from March to September, a significant drop from Janurary to Early March suggests that the relutance to shop after Christmas hype.
+
+ - There a increasing trend as the inflation and GDP is getting higher over year. 
+
+```{r fig.width=15,fig.height=7}
+myseries %>% 
+  gg_subseries()  +
+  theme_bw()+
+  ggtitle("Turnover in New South Wales by each month across year 1982-2018")+
+  labs(y="Turnover ($ million AUD)",
+       subtitle = "Other recreational goods retailing")+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+From the seasonal subseries plots, we can observe that :
+
+ - There is a strong trend in all months, with the largest trend in December and a larger increase in July and August than most other months.
+
+ - A seasonality emerge with the December's highest average and February lowest average.
+
+
+## Train-Test Split 
+
+For the sake of later model assessment, we want to split the data into training and testing set.
+```{r echo=T}
+myseries_train <-  myseries %>%
+  filter(Month <= max(Month)-24)
+
+myseries_test <-  myseries %>%
+  filter(Month >= max(Month)-24)
+```
+## Data transformation
+
+### Step 1: Fix the variance
+Our data has a multiplicative seasonality. To make it additive, we chose to use Box Cox transformation. 
+
+```{r}
+lambda_g <- myseries_train %>%
+features(Turnover, features = guerrero)
+lambda_g %>% select(3)%>%kab("")
+myseries_train$tran_turnover = box_cox(myseries_train$Turnover, lambda_g[,3])
+
+```
+
+Using Guerrero's method suggests us to choose the parameter of lambda to be `r lambda_g[1,3]`.
+
+```{r}
+myseries_train %>% 
+  autoplot(tran_turnover) +
+labs(y = "Box-Cox transformed turnover")+
+  theme_minimal()
+
+# myseries_train$tran_turnover = box_cox(myseries_train$Turnover, -0.506)
+
+```
+So, after transforming, our data has a additive seasonality. The variance is stablised and good for working with the ETS model.
+
+### Step 2: Remove seasonality
+
+We will use ARIMA model to fit and forecast. Therefore, prior to the model forecast or any fit, we want to ensure that the data is stationary. A stationary time series is the one whose properties **DO NOT** depend on the time.
+
+Differencing is a way to remove the seaonsality and trend of the data; however, we do not know how much differencing we need. Therefore, as a first step, we use the Kwiatkowski-Phillips-Schmidt-Shin (KPSS) test.
+
+```{r}
+myseries_train %>%
+  features(Turnover, unitroot_kpss)
+```
+The test's null hypothesis assumes $the~data~are~stationary~and~non~seasonal$.  Our test statistics (6.25) is greater than 1% critical value, so the p-value is less than 0.01. We can conclude that we can reject the null hypothesis. That is the data are non-stationary and it has seasonal behavior. 
+
+First, we remove the seasonality pattern of the data.
+
+```{r}
+myseries_train %>%
+  features(Turnover, unitroot_ndiffs) %>% kab(caption = "Number of differencing")
+```
+
+Using unitroot_ndiffs() suggests us to take one differencing.
+
+```{r}
+myseries_train %>% autoplot(
+ tran_turnover%>% 
+   difference(12)
+)+theme_minimal()
+
+myseries_train$tran_turnover = myseries_train$tran_turnover %>%   difference(12)
+```
+Hooray! It looks like our graph appears to be white noise, with removing the seasonality and trend. Being stationary means that the distribution of a stationary process would look the same at different points in time. 
+
+### Step 3: Ensure data is stationary
+
+Although the previous graph looks like white-noise, we have to be objective. So, the second step is to further check if the series is really stationary.
+
+```{r}
+myseries_train %>%
+  features(tran_turnover, unitroot_kpss)
+
+myseries_train %>%
+  gg_tsdisplay(tran_turnover, plot_type = "partial")
+```
+
+From the above graph, we can confirm that the series is stationary. Looking at the ACF plot, the lags are sinusoidal with the spikes slowly decaying. And from the PACF plot, the first spike is significantly closed to 1 (i.e., roughly 0.74), and it plummets after the first spike. The constant shows no patterns but floats around 0. For the above reasons, we can say that our data is stationary and the seasonal behavior have been removed.
+
+
+
+## Shortlisting appropriate ARIMA
+
+Examining the ACF and PACF plots also enables us to create a short-list of appropriate ARIMA.
+
+In the plots of the seasonally differenced data, there are spikes in the PACF at lags 12 and 24. This may be suggestive of a seasonal AR(2) term. There are also spikes in the ACF at lags 12 and 24; it may be suggestive of a seasonal MA(2) term. 
+
+In the non-seasonal lags, there are three or four significant spikes in the PACF, suggesting a possible AR(3) or AR(4) term. The pattern in the ACF is indicative of a MA(8) or MA(9). But since MA(8) or MA(9) is too high which makes the model less interpretable, and we can see that the third spike and sixth spike tend to drop quickly and prone to zero, hence MA(3) and MA(6) worth a trial.
+
+
+
+
+Consequently, this initial analysis suggests that a possible model for these data is an ARIMA(8,0,0)(2,1,0)[12] w/constant and ARIMA(8,0,0)(0,1,2)[12] w/constant. Note that all models come with a constant term. This is because our data has a positive trend, and we want our model to capture pick up the trend long-term forecast.  We will fit various models, all of which come with one differecing so that they are comparable. Models are listed below.
+
+ - **ARIMA( 1,0,1 ) ( 0,1,2 ) w/constant [12]**
+ - **ARIMA( 1,0,1 ) ( 2,1,2 ) w/constant [12]**
+ - **ARIMA( 1,0,1 ) ( 0,1,1 ) w/constant [12]**
+ - **ARIMA( 3,0,0 ) ( 2,1,0 ) w/constant [12]**
+ - **ARIMA( 1,0,1 ) ( 2,1,0 ) w/constant [12]** 
+ - **ARIMA( 3,0,6 ) ( 2,1,2 ) w/constant [12]**
+ - **ARIMA( 1,0,1 ) ( 2,1,0 ) w/constant [12]** 
+ - **ARIMA( 2,0,0 ) ( 2,1,2 ) w/constant [12]**
+ - **ARIMA( 3,0,8 ) ( 2,1,0 ) w/constant [12]** 
+ - **ARIMA( 4,0,8 ) ( 2,1,0 ) w/constant [12]** 
+ - **ARIMA( 3,0,3 ) ( 0,1,2 ) w/constant [12]** 
+
+## Shortlisting ETS
+
+```{r}
+myseries_train%>%
+  autoplot()+
+  ggtitle("Turnover in New South Wales (1982-2018)")+
+  labs(y="Turnover ($ million AUD)",
+       subtitle = "Other recreational goods retailing")+
+  theme(text=element_text(size=8))+
+  theme_minimal()
+```
+
+
+To select all possible ETS models manually, we will use the original data raw Turnover data, and examine the plot. We can see there is a significant increase in variance as the series increases in level. This means that the seasonality is multiplicative, with an additive trend. For the error component, as our data is about Turnover, we will try out both Multiplicative and Additive Error Component.
+
+## Fit all models
+```{r}
+
+fit_all <-myseries_train %>%
+  model(
+    arima_auto_ff = ARIMA( box_cox(`Turnover`, -0.506)  ~ pdq(1,0,4) + PDQ(0,1,1)), ## auto model with stepwise = f and appro = f
+        arima_auto_tt = ARIMA( box_cox(`Turnover`, -0.506)  ~ pdq(1,0,2) + PDQ(2,1,1)), ## auto model with stepwise = t and appro = t
+    arima_101012 = ARIMA( box_cox(`Turnover`, -0.506)  ~  pdq(1,0,1) + PDQ(0,1,2) + 1 ) ,
+    arima_101212 = ARIMA( box_cox(`Turnover`, -0.506)  ~ 1 + pdq(1,0,1) + PDQ(2, 1, 2)),
+    arima_101011 =ARIMA( box_cox(`Turnover`, -0.506)  ~ 1 + pdq(1,0,1) + PDQ(0,1,1)),
+    arima_300210 = ARIMA( box_cox(`Turnover`, -0.506)  ~  pdq(3,0,0) + PDQ(2,1,0) + 1 ) ,
+    arima_101210 = ARIMA( box_cox(`Turnover`, -0.506)  ~  pdq(1,0,1) + PDQ(2,1,0) + 1 ) , 
+     arima_306212 = ARIMA( box_cox(`Turnover`, -0.506)  ~  pdq(3,0,6) + PDQ(2,1,2) + 1 ) ,
+     arima_101210 = ARIMA( box_cox(`Turnover`, -0.506)  ~  pdq(1,0,1) + PDQ(2,1,0) + 1 ) , 
+     arima_200212 = ARIMA( box_cox(`Turnover`, -0.506)  ~  pdq(2,0,0) + PDQ(2,1,2) + 1 ) ,
+     arima_308210 = ARIMA( box_cox(`Turnover`, -0.506)  ~  pdq(3,0,8) + PDQ(2,1,0) + 1 ) , 
+     arima_408210 = ARIMA( box_cox(`Turnover`, -0.506)  ~  pdq(4,0,8) + PDQ(2,1,0) + 1 ) , 
+     arima_303012 = ARIMA( box_cox(`Turnover`, -0.506)  ~  pdq(3,0,3) + PDQ(0,1,2) + 1 ) , 
+     ets_MAM = ETS(Turnover ~ error("M") + trend("A") + season("M")),
+    ets_MAA = ETS(Turnover ~ error("M") + trend("A") + season("A")),
+    ets_auto   =   ETS(Turnover)
+
+  )
+```
+
+
+```{r}
+modelSC <- glance(fit_all) %>% select(.model,AIC,AICc, BIC) %>% arrange(AICc) 
+modelSC %>% DT::datatable(caption = "ARIMA model comparison")
+```
+
+After fitting all models for ETS and ARIMA, we extract the table with the models and its information criteria.
+
+ - For the ARIMA models, we can see that **arima_306212** earns the least AICc and AIC (-2831.67 and -2832.90 respectively). The second one - **arima_303012** - is not bad too. It has a minor difference with AICc being -2831.55 and AIC being -2832.11. The second one has less number of orders in ARIMA models (i.e., p,d,q,P,D,Q), making it more interpretable and less likely to overfit. Therefore, we can deem that arima_303012 to the best model among all ARIMA models. 
+ 
+ - For ETS models, the best model is one with Multiplicative error, Additive trend and Multiplicative seasonality (i.e., MAM). This model is unanimously the best model between the two ETS models as it has the lowest AIC and AICc.
+
+
+## Forecast and compare with the observed data.
+
+```{r fig.width=15,fig.height=7}
+fc_fit <- fit_all %>%
+  forecast(h = "24 months") 
+
+fc_fit %>% autoplot(myseries,level = NULL) +theme_minimal()
+```
+
+```{r}
+  fc_fit %>% accuracy(myseries) %>% select(.model, MAPE, RMSE) %>% 
+  arrange(MAPE) %>% DT::datatable()
+```
+
+
+Consequently, we use the forecast the test set and compare with the real value. We use RMSE and MAPE to benchemark the model accuracy. The ARIMA model selected (arima_303012) is not performing the best, but we insist to stick with our selection. This is because the difference of both RMSE and MAPE of the models in the list has only minor difference. The range of MAPE is 0.006 whereas range of RMSE 0.011. It does not necessary mean that the selectd model is worse, given the complexity of the order and above table. In terms of ETS model, MAM model has a lower MAPE and MSE than MAA, which is greatly aligned to our selection.
+
+
+```{r}
+fit_all$ets_auto
+fit_all$arima_auto_ff
+fit_all$arima_auto_tt
+```
+
+Since we are interested in the question of finding the best model to forecast, the next task is to confirm the best ARIMA and ETS models we selected above. We then run the models suggested by the algorithm. By setting step-wise = False and approximate = False in the function of auto-arima(),  the algorithm suggests to use **ARIMA(1,0,4)(0,1,1)[12] w/ drift** and **ARIMA(1,0,2)(2,1,1)[12] w/ drift** respectively, which are named arima_auto_tt and arima_auto_ff here. The performance is not as ideal as the selected one **arima_303012**. And it makes sense since the algorithm, as mentioned in the textbook, is a starting point to look for better model. In terms of ETS model, the algorithm suggest us to use ETS(M,A,M) model. It is good that the algorithm's suggestion in ETS is aligned to our ETS selection. 
+
+
+## Selecting the best ARIMA
+
+With the above analysis, we decided that our best ARIMA model is ARIMA( 3,0,3 ) ( 0,1,2 ) w/constant [12] and ETS model is ETS(M,A,M). We further examine them by showing parameter estimates, residual diagnostics, forecasts and prediction intervals for both models. Diagnostic checking for both models include ACF graphs and the Ljung-Box test. We will start from doing the ARIMA model first, then ETS model.
+  
+### Diagnostic checking for ARIMA( 3,0,3 ) ( 0,1,2 ) w/constant [12]
+
+```{r}
+fit_ARIMA <- myseries_train %>%
+  model(best_arima =  
+          ARIMA(box_cox(`Turnover`, -0.506) ~ pdq(3,0,3) + PDQ(0,1,2)+1)
+        )
+fit_ARIMA %>%
+  gg_tsresiduals()
+
+```
+
+
+
+The residual plot concludes ACF, PACF and histogram. They are to diagnose if there are any seasonality and other components left in residuals, and detect if residuals behave as white noise. 
+
+ - First, from the ACF plot, we can see that only the 26th lag slightly crosses the blue line. Out of 26 tests, only 1 appears to be slightly significant, which is not even a significant spike, therefore, we can conclude that that spike is random, and our residuals is a white noise process. 
+ 
+ - Second, from the histogram, the shape of residuals is apparently normally distributed, centering around 0. There is a little hump at the left tail, because it has random outliers. Therefore, it also suggests that our residuals is a white noise process. 
+ 
+ - Thirdly, from the residuals plot, most values float around 0 and appear to be of no pattern, so it suggests that our residuals is a white noise process.
+
+```{r}
+report(fit_ARIMA)
+```
+
+
+Although, from the above analysis, the plots intuitively conclude that our residuals is a white noise process, we have to be more vigorous. So, we use Ljung-Box test by setting up our null hypothesis (H0) to be : Residuals is white noise. Since this is a monthly data, so the lag is set to be 2*12. Using report(), we saw that there are 9 parameters being estimated in our model, so we configure degrees of freedom to be 9.  
+
+```{r echo=TRUE}
+augment(fit_ARIMA) %>%
+  features(.innov, ljung_box, lag = 2*12, dof = 9) %>%
+  select(lb_pvalue) %>% 
+  kab(caption = "Ljung-Box test for ARIMA model")
+```
+
+
+The result is 0.0805597. We failed to rejectc the null hypothesis, therefore we can also conclude that our residuals is a white noise process.
+
+### Parameter estimates, forecasts and prediction interval for ARIMA model
+
+With knowing our residuals of model behaving like white noise, we forecast with h = “24 months” using our training set data. This is done by using hilo().
+
+```{r}
+forecast_ARIMA <- fit_ARIMA %>%
+  forecast(h = "24 months")
+
+forecast_ARIMA_hilo <- forecast_ARIMA %>%
+  hilo() %>%
+  mutate(
+    pi80 = hilo(Turnover, 80),
+    pi95 = hilo(Turnover, 95),
+    Year_Month = as.character(Month)
+  ) %>%
+  unpack_hilo(cols = c(pi80, pi95))
+
+
+forecast_ARIMA_hilo %>% 
+  select(Year_Month,
+         pi80_lower,pi80_upper,pi95_lower,pi95_upper, -Month) %>%
+  datatable(  caption = "The prediction interval of ARIMA")
+
+```
+
+
+
+### Diagnostic checking for ETS(M,A,M)
+
+Likewise, we will use the same process to see if our residuals are in white noise, and then forecast it. 
+```{r}
+fit_ETS <- myseries_train %>%
+  model(
+    best_ets = ETS(Turnover ~ error("M") + trend("A") + season("M"))
+    )
+
+fit_ETS %>%
+  gg_tsresiduals()
+```
+
+
+The residuals are arguably white noise. There are 8 significant lags in ACF plot, one of which is lag 7. It might suggest that there is some seasonality component left. However, from the histogram, the shape appears to be somewhat normally distributed. The residual plot is of no patterns, in which the values float around zero. So, we can loosely say that the residuals are white noise, but left with caution.
+
+```{r}
+report(fit_ETS)
+```
+
+Same as ARIMA, we further use Ljung-Box test by setting up our null hypothesis (H0) to be : Residuals is white noise. Since this is a monthly data, so the lag is set to be 2*12. The degree of freedom is set to be 16 as we have 17 parameters (including gamma, beta, and alpha), and we minus 1. Using report(), we saw that there are 14 parameters being estimated in our model, so we configure degrees of freedom to be 14.  
+
+
+```{r echo=TRUE}
+augment(fit_ETS) %>%
+  features(.innov, ljung_box, 
+           lag = 2*12, 
+           dof = 16) %>% 
+  select(lb_pvalue) %>% 
+  kab(caption = "Ljung-Box test for ETS model")
+```
+
+
+The result is 7.17e-12. We reject the null hypothesis, therefore the Ljung-Box test suggests that our residuals is not a white noise process.
+
+So, with the above analysis, we cannot fully conclude that our residuals is entirely a white noise. That means that some information in residuals are not being used fully, and the prediction interval is not reliable. 
+
+### Parameter estimates, forecasts and prediction interval for ETS model.
+
+With white-noise in residuals being confirmed, we will forecast it using ETS model.
+
+```{r}
+forecast_ETS <- fit_ETS %>%
+  forecast(h = "24 months")
+
+forecast_ETS %>%
+  hilo() %>%
+  mutate(
+    pi80 = hilo(Turnover, 80),
+    pi95 = hilo(Turnover, 95),
+    Year_Month = as.character(Month)
+  ) %>%
+  unpack_hilo(cols = c(pi80, pi95)) %>% 
+  select(Year_Month,
+         pi80_lower,pi80_upper,pi95_lower,pi95_upper) %>%
+  datatable(  caption = "
+              The prediction interval of ETS")
+```
+
+
+We have forecast the next 24 months' values using the ETS model and ARIMA model. Let's make a comparison.
+
+
+```{r}
+train_fit <- myseries_train %>%
+  model(
+    best_arima =    ARIMA(box_cox(`Turnover`, -0.506) ~ pdq(3,0,3) + PDQ(0,1,2)+1),
+    best_ets = ETS(Turnover ~ error("M") + trend("A") + season("M"))
+  )
+
+train_fc <- train_fit %>%
+  forecast(h = "24 months")
+
+train_acc <- train_fc %>% accuracy(myseries) %>% select(-State, -Industry, -.type)
+train_acc %>% kab(caption = "ETS and ARIMA model accuracy")
+
+```
+
+
+
+The comparison is made by forecasting the test set. With the observed data named “myseries”, the accuracy() provides different metrics to benchmark both the models’ forecasts.
+
+Although we provided the values AICc and BIC for comparing the model performance, we cannot use these information criteria to compare. That is, we cannot compare the AIC from an ETS model with the AIC from an ARIMA model. We did one differencing in our ARIMA model, whereas an ETS model is always computed on the full set of data. Therefore, we will not use AICc to compare.
+
+However, we can use the metrics shown in the above table to compare the results, with which we can see that the ETS model performs better because it has more accurate results; it has lower in all metrics except ME (i.e, RMSE, MAE, MAPE, MASE, RMSSE). In the following section, we want to produce out of sample 80% prediction intervals to check how well the 80% prediction interval performs and see if the interval of ETS is reliable.
+
+```{r}
+train_fc %>% accuracy(myseries, measures = interval_accuracy_measures, level = 80) %>% select(-2,-3,-4) %>% kab(caption = "Winkler Score")
+```
+
+ARIMA's Winkler Score is higher; the prediction interval is more accurate. Another note is that since we knew the residuals of ETS is not a white-noise from ljung-Box test, which means that the prediction interval is not reliable, and hence ETS reasonably obtains lower score.
+
+```{r fig.width=15,fig.height=7}
+
+fit_full <- myseries %>% model(
+  best_arima =           ARIMA(box_cox(`Turnover`, -0.506) ~ pdq(3,0,3) + PDQ(0,1,2)+1),
+    best_ets = ETS(Turnover ~ error("M") + trend("A") + season("M"))
+  ) 
+
+forecast_full <- fit_full %>%
+  forecast(h = "24 months")
+
+forecast_full%>% 
+  autoplot(myseries, alpha = 0.8, level = 80)+  
+  theme_minimal()
+
+
+all_inv <- forecast_full %>% 
+  autoplot(myseries_test, alpha = 0.99, level = 80)+
+     ggtitle("ARIMA & ETS", subtitle = "80% prediction interval")+
+  theme_minimal()
+
+
+arima_intv <- forecast_full %>%
+  filter(.model == "best_arima") %>%
+  autoplot(myseries_test, alpha = 0.99, level = 80)+
+   ggtitle("ARIMA", subtitle = "80% prediction interval")+
+  theme_minimal()
+
+ets_intv <- forecast_full %>%
+  filter(.model == "best_ets") %>%
+  autoplot(myseries_test, alpha = 0.99, level = 80, color="red")+
+  ggtitle("ETS", subtitle = "80% prediction interval")+
+  theme_minimal()
+
+library(patchwork)
+arima_intv +ets_intv  +  all_inv+ plot_layout(ncol = 1, nrow = 4)
+
+```
+
+
+We produced the out-of-sample point forecasts and 80% prediction intervals, and plot them out. The results seem to to be similar, if not identical. They pick up the trend and seasonality reasonably well. ARIMA optimistically forecasts with slightly higher values and wider prediction interval in the peak.
+
+### Comparision with true values for 2 years
+Here we go to the most exciting part: comparing the forecasts with the actual numbers. We first obtain the data using the package of **readabs**; it is from the ABS website (Cat. 8501.0, Table 11). We are interested in how well these two models perform in real life. 
+
+### Load the latest data from ABS
+```{r echo=T}
+library(readabs)
+
+ABS_data <- read_abs(cat_no = 8501.0,
+                       tables = 11,
+                       series_id = NULL,
+                       path = Sys.getenv("R_READABS_PATH", unset = tempdir()),
+                       metadata = TRUE,
+                       show_progress_bars = TRUE,
+                       retain_files = TRUE,
+                       check_local = TRUE)
+```
+
+
+```{r }
+myABS_data <- ABS_data %>% filter(
+    series_id == "A3349791W")
+
+myABS_data <- myABS_data %>%
+  mutate(Month = yearmonth(date), 
+         Turnover = value,`Series ID` = series_id, 
+         State = "New South Wales",
+         Industry = "Other recreational goods retailing")
+
+myABS_data <- myABS_data %>%
+  select(-sheet_no, -table_title, -series_type, -data_type, -table_no, -collection_month, -unit, -frequency, -series, -date, -value, -series_id)
+
+myABS_data <- myABS_data %>%
+  as_tsibble(index = Month,
+    key = c(State, Industry, `Series ID`))
+
+myABS_data <- myABS_data %>%
+  select(State, Industry, `Series ID`, Month, Turnover)
+
+myABS_data %>%
+  autoplot()+
+  theme(text=element_text(size=8))+
+  geom_smooth()+
+  theme_minimal()+ 
+  ggtitle("Turnover in New South Wales (1982-2022)")+
+  labs(y="Turnover ($ million AUD)",
+       subtitle = "Other recreational goods retailing", caption = "(Source : ABS, 2022)")
+```
+
+We successfully fetch the correct data, given that the first plot and above plot are identical. The data is latest up to 2022 Mar. Now we are trying to forecast the values and exmine the model performance.
+
+
+```{r}
+latest_test <- myABS_data %>%
+  filter(Month <= yearmonth("2020 Dec") & Month >= yearmonth("2019 Jan"))
+
+forecast_full %>% 
+  autoplot + 
+  ggtitle("Turnover in New South Wales (2019-2021)")+
+  labs(y="Turnover ($ million AUD)",
+       subtitle = "Other recreational goods retailing", caption = "(Source : ABS, 2022)")+
+  autolayer(latest_test) +
+  theme_minimal()
+```
+
+```{r}
+forecast_real_acc <- forecast_full %>%
+  accuracy(latest_test) %>% 
+  select(-State, -Industry,
+         -.type, 
+         -MASE ,
+         -RMSSE)
+forecast_real_acc %>% 
+  kab(caption = "Model accuracy for ETS and ARIMA models")
+# forecast_full %>%
+#   accuracy(test_latest) %>% 
+#   select(-State, -Industry,-.type) %>% 
+#   kab
+```
+### "A good fit to training data is never an indication that the model will forecast well."
+
+Differ from the previous result, using the real data to forecast gives a different conclusion: ARIMA outperforms the ETS model. We have two obsersvation:
+
+**Regardless of which measure of errors is used (i.e., RMSE, MAE, MAPE), the metrics above signify that ARIMA has lower errors; it predicted the results more accurately with real data. The following explains them in detail:**
+
+ - An important measure is the RMSE because it is the measure that's optimal to the mean, and we are interested in the mean. ARIMA has a lower RMSE so it is a better fit. Whereas MAE implies the forecast's distance, on average, from the true value; here our ARIMA's ME is lower, so it suggests that the distance on average from the true value is shorter (20.3), compared to ETS (25.1).
+
+ - Another common measure used by the industry is MAPE, because a percentage is easier to interpret. MAPE of both models is similar (14.1; 14.6). That is, a MAPE value of 14% means that the average difference between the forecasted value and the actual value is 14%.
+
+ - With the above analysis, one observation is ARIMA has lower errors (i.e., RMSE, MAE, MAPE).
+
+**Another observation is that ETS has a sign of overfitting; we explain it based on the evidence of ME, MPE and ACF1.**
+
+ - A lag 1 autocorrelation (i.e., ACF1 in the above) is the measure of how much is the current value influenced by the previous values in a time series. A positive value suggests that there is a tendency for a system to remain in the same state from one observation to the next. In our case, we noticed that both ARIMA and ETS models have high values in ACF1 (0.73; 0.86). After forecasting the test-set and real values, our ETS has higher ACF1 so it relatively recommends that the future values depends on the past values.
+
+ - ME and MPE measure model bias, of which ETS is higher. A model with higher bias implies that it is oversimplified and does not capture the relationship between the variables. 
+
+ - A good fit to training data is never an indication that the model will forecast well. With higher bias and reliance of autocorrelation, ETS performs better in test-set but worse in real data.
+
+ - The above analysis gives us a hint that our ETS might be overfitting.
+
+A saying *"there is no best without a measure of goodness"* tells us that we need to define what is good. A better model can mean 1) fastest to compute; 2) robust indicator of central tendency; 3) robust indicator of variation around central tendency. **Here, taking the third, the better model forecasts with less errors.** The indicators measure two types of errors (i.e., bias and variance). ARIMA has lower errors and bias so we think ARIMA is better. 
+
+Despite ARIMA having lower errors, there is one caveat : unit of the data. The error is based AUD in million. So ME being 3, for example, signifies that the mean error between the forecasts and the true data is AUD 3 in million. Another example is the MAPE of ARIMA and ETS is 14% which means that the errors are greater then the actual values. 
+
+
+## A discussion of benefits and limitations of the models for our data.
+
+Overall, the rigor of evidence tells us that both models possess the prowess to capture the trend and seasonality well, given that the lines between the true values and forecasted value are similar and the lines' distance are small. 
+
+Further, we have erred on the side of caution from the above section, and say that ARIMA model forecasts better in 24 months which deems a short series. So we can also conclude the benefit of ARIMA is that it performs well in short series. We can also see the ARIMA's forecast look almost identical to the second peak (From 2019 OCT to 2020 JAN). Both models capture well the burgeoning trend from 2019 OCT to 2019 DEC. The trend obviously attributes to the Christmas effect. They capture well the dwindling trend from from 2020 JAN to 2020 APR, as a sign of reluctance to shop after Christmas holiday. We can also see that from around 2020 APR onward, there is a clear increasing trend in the real data, surpassing the forecast model. This means that both models underestimate the actual trend. This gives a benefits for conservative economists to forecast the economy or conservative business people to forecast the upcoming turnover. This underestimation is less for ARIMA model, and the final point is identical to the true value therefore we can say that ARIMA pick the trend up better.
+
+In terms of prediction interval, we can plausibly say that before 2020 APR the 95% interval of ARIMA capture the trend quite well. Whereas the ETS 80% pick the trend up very well after 2020 APR by covering the real data. Again, since ARIMA's prediction interval does cover the real data most of the time, ARIMA is better. But one benefit of ETS model is that the prediction interval is wider, we can say that it is good for the consertivist's sake; when some extreme event occurs (e.g, COVID 19), the true data wouldn’t be too far away from the forecasts.
+
+The limitation of the ETS model is that we rejected the null hypothesis of the Ljung-Box test. That is, our residuals is not a white noise process so the prediction interval might be partially reliable. Another note is that it doesn’t model the data with a white noise residuals. If the model considers white noise residuals, the forecasts could be closer. This is because considering white noise residuals means that we capture all the information in the data without information being left in residuals. Hence, the ETS model with considering a white noise residuals gives a more accurate forecast. 
+
+
+The limitation of the ARIMA model is fourfold:
+
+ - First, the prediction interval is narrower, despite capturing most of the real data. So, if there are some sudden events that trigger the trend movement (e.g, market collapse), ARIMA might not works as good. 
+
+ - Second, the inconvenience that brings based on the assumption. ARIMA only works with stationary time series which we can rarely find a series with such nature. We end up a need of differencing which drives up the model complexity and computation expensiveness (Let alone that we usually do a cross validation). 
+
+ - Third, the model identification techniques for identifying the correct model engenders the question of  objectivity and reliability of the chosen model of the model. So, a well-chosen model can be an art and depended on the skill and experience of the forecaster. 
+
+ - Fourth, it is not as intuitive and explainable as ETS. ARIMA includes the components of autoregressive (AR) and moving average (MA), in which it took us weeks to build up the foundation before getting to the combined model. So, the modelling procedures make ARIMA less easy to explain. If we need explainability in modelling we should not use the ARIMA model because its nature is not very explainable. In such situations, we can choose models like exponential smoothing, moving average (MA) etc. the reason behind the less explainability is the combination of three  makes it difficult to interpret. Therefore, there is a limitation of ARIMA despite its outstanding performance. 
+
+
+
+
+
+
