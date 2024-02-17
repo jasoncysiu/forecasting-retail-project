@@ -1,2 +1,2 @@
 # forecasting-retail-project
-https://www.jason-siu.com/forecasting-retail-project/Retail_project.html
+https://jasoncysiu.github.io//forecasting-retail-project/Retail_project.html
